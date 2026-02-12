@@ -10,7 +10,7 @@ Copy `src/gen-x.ts` directly into your NovelAI Script project.
 
 ### Method B: npm + nibs
 
-If your project uses [nibs](https://github.com/keilladraconis/nibs) or another bundler that resolves `node_modules`:
+If your project uses [nibs](https://github.com/LaneRendell/NovelAI_Script_BuildSystem) or another bundler that resolves `node_modules`:
 
 ```bash
 npm install nai-gen-x

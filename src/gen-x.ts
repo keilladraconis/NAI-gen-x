@@ -1,6 +1,6 @@
 /**
  * gen-x.ts
- * v1.0.0
+ * v0.1.0
  *
  * The Generation eXchange.
  * A single-threaded, queued generation engine with built-in budget management,
