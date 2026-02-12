@@ -31,10 +31,6 @@
     "type": "git",
     "url": "git+https://github.com/keilladraconis/NAI-gen-x.git"
   },
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
   "devDependencies": {
     "typescript": "^5.7.0"
   }
