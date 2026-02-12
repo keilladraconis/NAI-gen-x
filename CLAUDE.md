@@ -6,13 +6,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 NAI-gen-x is a NovelAI Script module — a queued generation engine (`GenX` class) that wraps the NovelAI Scripting API (`api.v1`) with budget management, exponential backoff for transient errors, and reactive state. It runs inside NovelAI's scripting runtime, not as a standalone Node.js application.
 
+## Package
+
+- **npm name:** `nai-gen-x`
+- **Distribution:** Raw TypeScript source (no compilation)
+- **Exports:** `./src/gen-x.ts`
+
 ## Build & Type Checking
 
-There is no build step or bundler — the project uses `noEmit` TypeScript for type-checking only. There is no package.json yet.
+There is no build step or bundler — the project uses `noEmit` TypeScript for type-checking only.
 
 ```bash
-npx tsc --noEmit        # Type-check the project
+npm install              # Install devDependencies (typescript)
+npm run typecheck        # Type-check the project (tsc --noEmit)
 ```
+
+## Release Workflow
+
+Publishing is automated via GitHub Actions (`.github/workflows/publish.yml`):
+- **Trigger:** Creating a GitHub Release
+- **Method:** OIDC trusted publishing (no NPM_TOKEN secret needed)
+- **Steps:** checkout → install → type-check → dry-run pack → publish
+- **First publish** must be done manually (`npm publish --access public`), then configure trusted publishing on npmjs.com
 
 ## Architecture
 
@@ -34,4 +49,4 @@ Key concepts:
 
 - Strict mode with `noImplicitAny`, `noUnusedLocals`, `noUnusedParameters`
 - Target ES2023, module resolution `bundler`
-- Tests use vitest globals (types registered in tsconfig)
+- No test framework currently configured; add `vitest` and restore `"types": ["vitest/globals"]` in tsconfig when tests are added

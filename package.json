@@ -1,0 +1,41 @@
+{
+  "name": "nai-gen-x",
+  "version": "0.1.0",
+  "description": "Queued generation engine for NovelAI Scripts with budget management, exponential backoff, and reactive state",
+  "type": "module",
+  "main": "./src/gen-x.ts",
+  "types": "./src/gen-x.ts",
+  "exports": {
+    ".": {
+      "types": "./src/gen-x.ts",
+      "default": "./src/gen-x.ts"
+    }
+  },
+  "files": [
+    "src/gen-x.ts",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "novelai",
+    "generation",
+    "queue",
+    "scripting"
+  ],
+  "author": "keilladraconis",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/keilladraconis/NAI-gen-x.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

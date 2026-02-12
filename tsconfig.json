@@ -16,8 +16,7 @@
     "noEmit": true,
     "typeRoots": ["./external", "./node_modules/@types", "./node_modules"],
     "rewriteRelativeImportExtensions": true,
-    "noImplicitAny": true,
-    "types": ["node", "vitest/globals"]
+    "noImplicitAny": true
   },
   "include": ["src/**/*", "external/**/*", "tests/**/*"],
   "exclude": ["node_modules", "dist"]
