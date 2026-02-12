@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "lib": ["ES2023"],
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowSyntheticDefaultImports": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": true,
+    "typeRoots": ["./external", "./node_modules/@types", "./node_modules"],
+    "rewriteRelativeImportExtensions": true,
+    "noImplicitAny": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*", "external/**/*", "tests/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
