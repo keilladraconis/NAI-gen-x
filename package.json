@@ -1,6 +1,6 @@
 {
   "name": "nai-gen-x",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Queued generation engine for NovelAI Scripts with budget management, exponential backoff, and reactive state",
   "type": "module",
   "main": "./src/gen-x.ts",

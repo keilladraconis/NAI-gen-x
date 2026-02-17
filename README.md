@@ -1,6 +1,6 @@
 # nai-gen-x
 
-A queued generation engine for [NovelAI Scripts](https://docs.novelai.net/Scripting). Wraps the `api.v1` scripting API with sequential queue processing, budget management, exponential backoff for transient errors, and reactive state.
+A queued generation engine for [NovelAI Scripts](https://docs.novelai.net/Scripting). Wraps the `api.v1` scripting API with sequential queue processing, automatic context budgeting, output budget management, exponential backoff for transient errors, and reactive state.
 
 ## Installation
 
@@ -49,6 +49,9 @@ const response = await genx.generate(
     return {
       messages: context.messages,
       params: { max_tokens: context.budget },
+      // Pin the first message (system prompt) and last 2 messages (instruction + prefill).
+      // Middle messages are automatically trimmed to fit the model's context window.
+      contextPinning: { head: 1, tail: 2 },
     };
   },
   { model: "glm-4-6", max_tokens: 200 },
@@ -65,7 +68,19 @@ Tasks are enqueued via `generate()` and processed sequentially. This prevents co
 
 Pass a function instead of a message array to `generate()`. The factory is called just-in-time when the task is picked off the queue, enabling deferred strategy building based on the latest state.
 
-### Budget Management
+### Context Budgeting
+
+When a `MessageFactory` returns `contextPinning`, GenX automatically trims the message array to fit within the model's context window before sending it to the API. This prevents generation failures on lower-tier subscriptions where `api.v1.maxTokens()` returns a smaller budget.
+
+**How it works:** The `head` and `tail` counts designate messages that are always kept (e.g., system prompt at the front, instructions + prefill at the back). Everything in the middle is fed through a `RolloverHelper` that drops the oldest middle messages until the total fits within:
+
+```
+available = maxTokens(model) - tokenCount(head + tail) - max_tokens (output reserve)
+```
+
+If no messages need trimming, the array passes through unchanged. When messages are dropped, GenX logs: `[GenX] Trimmed N/M middle messages (budget=..., used=...)`.
+
+### Output Budget Management
 
 Before each generation, GenX checks the platform's output token allowance via `api.v1.script.getAllowedOutput`. If budget is insufficient, it transitions through `waiting_for_user` and `waiting_for_budget` states, then resumes automatically when tokens become available.
 
@@ -181,8 +196,22 @@ interface GenerationState {
 type MessageFactory = () => Promise<{
   messages: Message[];
   params?: Partial<GenerationParams>;
+  contextPinning?: ContextPinning;
 }>;
 ```
+
+### `ContextPinning`
+
+```ts
+type ContextPinning = { head: number; tail: number };
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `head` | `number` | Number of leading messages to always keep (e.g., system prompt) |
+| `tail` | `number` | Number of trailing messages to always keep (e.g., instruction + prefill) |
+
+Messages between `head` and `tail` are the "middle" — these are trimmed oldest-first when the assembled context exceeds the model's token budget. If `head + tail >= messages.length`, no trimming is performed.
 
 ### `GenXHooks`
 

@@ -1,6 +1,6 @@
 /**
  * gen-x.ts
- * v0.1.0
+ * v0.2.0
  *
  * The Generation eXchange.
  * A single-threaded, queued generation engine with built-in budget management,
@@ -23,10 +23,19 @@ export interface GenerationState {
   budgetWaitEndTime?: number;
 }
 
+/** Context pinning for automatic context budgeting.
+ * head = number of leading messages to keep (system prompt).
+ * tail = number of trailing messages to keep (instruction + prefill).
+ * Middle messages between head and tail are trimmed via RolloverHelper
+ * when the total context exceeds the model's token budget.
+ */
+export type ContextPinning = { head: number; tail: number };
+
 // Message factory for JIT (just-in-time) strategy building
 export type MessageFactory = () => Promise<{
   messages: Message[];
   params?: Partial<GenerationParams>;
+  contextPinning?: ContextPinning;
 }>;
 
 interface GenerationTask {
@@ -38,6 +47,7 @@ interface GenerationTask {
     maxRetries?: number;
     taskId?: string;
   };
+  contextPinning?: ContextPinning;
   callback?: (choices: GenerationChoice[], final: boolean) => void;
   behaviour?: "background" | "blocking";
   signal?: CancellationSignal;
@@ -198,6 +208,68 @@ export class GenX {
     this.hooks?.onStateChange?.(snapshot);
   }
 
+  private async trimToContextBudget(
+    messages: Message[],
+    params: GenerationParams,
+    pinning: ContextPinning,
+  ): Promise<Message[]> {
+    const model = params.model;
+    const maxContext = await api.v1.maxTokens(model);
+    const rolloverBudget = await api.v1.rolloverTokens(model);
+    const outputTokens = params.max_tokens || 1024;
+
+    const headMsgs = messages.slice(0, pinning.head);
+    const tailMsgs = messages.slice(messages.length - pinning.tail);
+    const middleMsgs = messages.slice(pinning.head, messages.length - pinning.tail);
+
+    if (middleMsgs.length === 0) return messages;
+
+    // Count fixed token costs
+    let fixedTokens = 0;
+    for (const msg of [...headMsgs, ...tailMsgs]) {
+      const encoded = await api.v1.tokenizer.encode(msg.content || "", model);
+      fixedTokens += encoded.length;
+    }
+
+    const middleBudget = maxContext - fixedTokens - outputTokens;
+
+    if (middleBudget <= 0) {
+      api.v1.log(
+        `[GenX] Context budget exhausted — dropping all middle content ` +
+        `(fixed=${fixedTokens}, output=${outputTokens}, max=${maxContext})`,
+      );
+      return [...headMsgs, ...tailMsgs];
+    }
+
+    const helper = api.v1.createRolloverHelper<
+      RolloverHelperContentObject & { role: string }
+    >({
+      maxTokens: middleBudget,
+      rolloverTokens: rolloverBudget,
+      model,
+    });
+
+    for (const msg of middleMsgs) {
+      await helper.add({ content: msg.content || "", role: msg.role });
+    }
+
+    const surviving = helper.read();
+
+    if (surviving.length < middleMsgs.length) {
+      api.v1.log(
+        `[GenX] Trimmed ${middleMsgs.length - surviving.length}/${middleMsgs.length} middle messages ` +
+        `(budget=${middleBudget}, used=${helper.totalTokens()})`,
+      );
+    }
+
+    const trimmedMiddle: Message[] = surviving.map((item) => ({
+      role: item.role as Message["role"],
+      content: item.content,
+    }));
+
+    return [...headMsgs, ...trimmedMiddle, ...tailMsgs];
+  }
+
   private async processQueue() {
     if (this.currentTask) return; // Already processing
     if (this.queue.length === 0) {
@@ -241,6 +313,9 @@ export class GenX {
         if (resolved.params) {
           params = { ...params, ...resolved.params };
         }
+        if (resolved.contextPinning) {
+          task.contextPinning = resolved.contextPinning;
+        }
       } catch (e: any) {
         this.updateState({ status: "failed", error: e.message || String(e) });
         reject(e);
@@ -254,6 +329,10 @@ export class GenX {
       reject(err);
       return;
     }
+
+    // Context budgeting: trim content to fit tier's token limit
+    const pinning = task.contextPinning ?? { head: 0, tail: 0 };
+    messages = await this.trimToContextBudget(messages, params, pinning);
 
     this.hooks?.beforeGenerate?.(task.id, messages);
 
