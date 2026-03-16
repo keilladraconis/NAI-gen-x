@@ -1,6 +1,6 @@
 /**
  * gen-x.ts
- * v0.2.0
+ * v0.3.0
  *
  * The Generation eXchange.
  * A single-threaded, queued generation engine with built-in budget management,
@@ -43,7 +43,6 @@ interface GenerationTask {
   messages: Message[] | null; // null if using factory
   messageFactory?: MessageFactory;
   params: GenerationParams & {
-    minTokens?: number;
     maxRetries?: number;
     taskId?: string;
   };
@@ -73,7 +72,7 @@ export class GenX {
     queueLength: 0,
   };
 
-  private listeners: ((state: GenerationState) => void)[] = [];
+  private listeners = new Set<(state: GenerationState) => void>();
   private hooks?: GenXHooks;
 
   constructor(hooks?: GenXHooks) {
@@ -88,10 +87,10 @@ export class GenX {
   }
 
   public subscribe(listener: (state: GenerationState) => void): () => void {
-    this.listeners.push(listener);
+    this.listeners.add(listener);
     listener(this.state); // Immediate update
     return () => {
-      this.listeners = this.listeners.filter((l) => l !== listener);
+      this.listeners.delete(listener);
     };
   }
 
@@ -105,7 +104,6 @@ export class GenX {
   public generate(
     messages: Message[] | MessageFactory,
     params: GenerationParams & {
-      minTokens?: number;
       maxRetries?: number;
       taskId?: string;
     },
@@ -164,8 +162,12 @@ export class GenX {
   }
 
   public cancelAll() {
-    // 1. Clear queue
-    this.queue = [];
+    // 1. Reject and clear queued tasks
+    const abandoned = this.queue.splice(0);
+    for (const task of abandoned) {
+      task.signal?.cancel();
+      task.reject("Cancelled");
+    }
 
     // 2. Cancel current task if running
     if (this.currentTask && this.currentTask.signal) {
@@ -196,7 +198,7 @@ export class GenX {
   // --- Internal Logic ---
 
   private updateState(partial: Partial<GenerationState>) {
-    Object.assign(this._state, partial);
+    this._state = { ...this._state, ...partial };
     const snapshot = { ...this._state };
     this.listeners.forEach((l) => {
       try {
@@ -336,7 +338,7 @@ export class GenX {
 
     this.hooks?.beforeGenerate?.(task.id, messages);
 
-    const { minTokens, maxRetries, taskId, ...apiParams } = params;
+    const { maxRetries, taskId, ...apiParams } = params;
     const retryLimit = maxRetries ?? 5;
     let attempts = 0;
 
@@ -348,10 +350,9 @@ export class GenX {
 
       try {
         const requestedTokens = apiParams.max_tokens || 1024;
-        const minimumTokens = minTokens || 1;
 
         // Budget Check
-        await this.ensureBudget(requestedTokens, minimumTokens, signal);
+        await this.ensureBudget(requestedTokens, signal);
 
         if (signal?.cancelled) {
           reject("Cancelled");
@@ -413,7 +414,6 @@ export class GenX {
 
   private async ensureBudget(
     requested: number,
-    _min: number,
     signal?: CancellationSignal,
   ): Promise<void> {
     let available = api.v1.script.getAllowedOutput();
