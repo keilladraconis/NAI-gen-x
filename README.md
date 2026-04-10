@@ -2,6 +2,21 @@
 
 A queued generation engine for [NovelAI Scripts](https://docs.novelai.net/Scripting). Wraps the `api.v1` scripting API with sequential queue processing, automatic context budgeting, output budget management, exponential backoff for transient errors, and reactive state.
 
+## Drop-in for `api.v1.generate`
+
+GenX `.generate()` has the same signature and return type as `api.v1.generate`:
+
+```ts
+// Before
+const result = await api.v1.generate(messages, params, callback, behaviour, signal);
+
+// After
+const genx = new GenX();
+const result = await genx.generate(messages, params, callback, behaviour, signal);
+```
+
+Swap the caller, get the queue, budget management, retry logic, and reactive state for free — no other changes needed.
+
 ## Installation
 
 ### Method A: Copy-paste (simplest)
@@ -126,7 +141,6 @@ Registers a listener called on every state change. The listener receives an imme
 generate(
   messages: Message[] | MessageFactory,
   params: GenerationParams & {
-    minTokens?: number;
     maxRetries?: number;
     taskId?: string;
   },
@@ -150,7 +164,6 @@ Enqueues a generation request. Parameters mirror `api.v1.generate` with addition
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `minTokens` | `number` | `1` | Minimum tokens required for budget check |
 | `maxRetries` | `number` | `5` | Max transient error retries |
 | `taskId` | `string` | `api.v1.uuid()` | Custom task identifier |
 
