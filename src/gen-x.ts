@@ -1,6 +1,6 @@
 /**
  * gen-x.ts
- * v0.3.0
+ * v0.4.0
  *
  * The Generation eXchange.
  * A single-threaded, queued generation engine with built-in budget management,
@@ -352,7 +352,7 @@ export class GenX {
         const requestedTokens = apiParams.max_tokens || 1024;
 
         // Budget Check
-        await this.ensureBudget(requestedTokens, signal);
+        await this.ensureBudget(messages, params, requestedTokens, signal);
 
         if (signal?.cancelled) {
           reject("Cancelled");
@@ -413,32 +413,52 @@ export class GenX {
   }
 
   private async ensureBudget(
-    requested: number,
+    messages: Message[],
+    params: GenerationParams,
+    requestedOutput: number,
     signal?: CancellationSignal,
   ): Promise<void> {
-    let available = api.v1.script.getAllowedOutput();
+    const availableOutput = api.v1.script.getAllowedOutput();
+    const availableInput = api.v1.script.getAllowedInput();
 
-    if (available < requested) {
-      const time = api.v1.script.getTimeUntilAllowedOutput(requested);
-      const targetEnd = Date.now() + time;
-
-      api.v1.log(
-        `Waiting for budget: Have ${available}, Need ${requested}, Time ${time}ms`,
-      );
-
-      this.updateState({
-        status: "waiting_for_user",
-        budgetWaitEndTime: targetEnd,
-      });
-
-      // 3. Final Wait (Platform enforcement)
-      await api.v1.script.waitForAllowedOutput(requested);
-      if (signal?.cancelled) return;
-
-      this.updateState({
-        status: "generating",
-      });
+    // Compute input token count from messages
+    let requestedInput = 0;
+    for (const msg of messages) {
+      const encoded = await api.v1.tokenizer.encode(msg.content || "", params.model);
+      requestedInput += encoded.length;
     }
+
+    const outputBlocking = availableOutput < requestedOutput;
+    const inputBlocking = availableInput < requestedInput;
+
+    if (!outputBlocking && !inputBlocking) return;
+
+    const outputWait = outputBlocking ? api.v1.script.getTimeUntilAllowedOutput(requestedOutput) : 0;
+    const inputWait = inputBlocking ? api.v1.script.getTimeUntilAllowedInput(requestedInput) : 0;
+
+    api.v1.log(
+      `Waiting for budget: output=${availableOutput}/${requestedOutput} (wait=${outputWait}ms), ` +
+      `input=${availableInput}/${requestedInput} (wait=${inputWait}ms)`,
+    );
+
+    this.updateState({
+      status: "waiting_for_user",
+      budgetWaitEndTime: Date.now() + Math.max(outputWait, inputWait),
+    });
+
+    // Wait for the longer budget first — the shorter one will have resolved by then
+    if (outputWait >= inputWait) {
+      if (outputBlocking) await api.v1.script.waitForAllowedOutput(requestedOutput);
+      if (signal?.cancelled) return;
+      if (inputBlocking) await api.v1.script.waitForAllowedInput(requestedInput);
+    } else {
+      if (inputBlocking) await api.v1.script.waitForAllowedInput(requestedInput);
+      if (signal?.cancelled) return;
+      if (outputBlocking) await api.v1.script.waitForAllowedOutput(requestedOutput);
+    }
+    if (signal?.cancelled) return;
+
+    this.updateState({ status: "generating" });
   }
 
   private isTransientError(e: any): boolean {

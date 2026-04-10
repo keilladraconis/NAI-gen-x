@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.0] - 2026-04-10
+
+### Added
+
+- **Input budget checking** — `ensureBudget` now checks `getAllowedInput()` alongside `getAllowedOutput()`. If either budget is insufficient, the engine waits; if both are blocking, the budget with the greater wait time is awaited first (the shorter one will have resolved by then). `budgetWaitEndTime` reflects the true blocking duration (`max` of both waits).
+
 ## [0.3.0] - 2026-03-16
 
 ### Fixed
