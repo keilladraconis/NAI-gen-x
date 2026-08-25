@@ -97,11 +97,47 @@ If no messages need trimming, the array passes through unchanged. When messages 
 
 ### Output Budget Management
 
-Before each generation, GenX checks the platform's output token allowance via `api.v1.script.getAllowedOutput`. If budget is insufficient, it transitions through `waiting_for_user` and `waiting_for_budget` states, then resumes automatically when tokens become available.
+Before each generation, GenX checks the platform's output token allowance via `api.v1.script.getAllowedOutput`. If budget is insufficient, it transitions through `waiting_for_user` and `waiting_for_budget` states, then resumes automatically when tokens become available. Callers that can't afford to wait can opt out with [`fastRejection`](#fast-rejection-opportunistic-background-work).
 
 ### Transient Error Retry
 
 Network errors, timeouts, and aborted requests are retried with exponential backoff (2^n seconds) up to `maxRetries` (default: 5).
+
+### Fast Rejection (opportunistic background work)
+
+Background processors that generate speculatively shouldn't hold the queue or park the engine in a waiting state — the UI would read that as "the user must click Generate and wait for budget". Pass `fastRejection: true` and the call bails out instead of waiting:
+
+```ts
+import { GenX, isFastRejection } from "nai-gen-x";
+
+try {
+  const response = await genx.generate(buildMessages, {
+    model: "glm-4-6",
+    max_tokens: 200,
+    fastRejection: true,
+  });
+  applyResult(response);
+} catch (e) {
+  if (isFastRejection(e)) {
+    // "busy" — another task holds the engine
+    // "budget" — not enough input/output allowance right now
+    scheduleRetry(e.retryAfterMs ?? 30_000);
+    return;
+  }
+  throw e; // a real generation failure
+}
+```
+
+The promise rejects with a `FastRejectionError` when:
+
+| `reason` | Condition | Instead of |
+|----------|-----------|------------|
+| `"busy"` | A task is executing or queued | Being appended to the queue (`queued` status) |
+| `"budget"` | `getAllowedInput()`/`getAllowedOutput()` is short | `waiting_for_user` → `waiting_for_budget` and awaiting `waitForAllowedInput`/`waitForAllowedOutput` |
+
+For `"budget"`, `retryAfterMs` carries `max(getTimeUntilAllowedInput, getTimeUntilAllowedOutput)` as a hint for your own retry loop. It ignores the user-interaction flag, so budget may still be withheld after that delay until the user interacts with the app.
+
+Fast-rejection tasks also default `maxRetries` to `0` — the engine won't sleep through exponential backoff on your behalf (pass an explicit `maxRetries` if you want it to). Neither the rejection itself nor an exhausted transient error broadcasts a `failed` status, so the shared state stays quiet; a genuine generation error still sets `failed` as usual.
 
 ### Reactive State
 
@@ -143,6 +179,7 @@ generate(
   params: GenerationParams & {
     maxRetries?: number;
     taskId?: string;
+    fastRejection?: boolean;
   },
   callback?: (choices: GenerationChoice[], final: boolean) => void,
   behaviour?: "background" | "blocking",
@@ -164,8 +201,9 @@ Enqueues a generation request. Parameters mirror `api.v1.generate` with addition
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `maxRetries` | `number` | `5` | Max transient error retries |
+| `maxRetries` | `number` | `5` (`0` with `fastRejection`) | Max transient error retries |
 | `taskId` | `string` | `api.v1.uuid()` | Custom task identifier |
+| `fastRejection` | `boolean` | `false` | Reject immediately with a `FastRejectionError` instead of queueing or waiting for budget |
 
 ### `genx.getTaskStatus(taskId)`
 
@@ -202,6 +240,20 @@ interface GenerationState {
   budgetWaitEndTime?: number;
 }
 ```
+
+### `FastRejectionError`
+
+```ts
+class FastRejectionError extends Error {
+  readonly isFastRejection: true;
+  readonly reason: "busy" | "budget";
+  readonly retryAfterMs?: number; // only for reason === "budget"
+}
+
+function isFastRejection(e: unknown): e is FastRejectionError;
+```
+
+Rejected from `generate()` when `fastRejection: true` and the request would have queued or waited. Prefer `isFastRejection(e)` over `instanceof` — the brand survives module duplication across bundles.
 
 ### `MessageFactory`
 

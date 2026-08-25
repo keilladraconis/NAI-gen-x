@@ -1,6 +1,6 @@
 /**
  * gen-x.ts
- * v0.4.0
+ * v0.5.0
  *
  * The Generation eXchange.
  * A single-threaded, queued generation engine with built-in budget management,
@@ -21,6 +21,48 @@ export interface GenerationState {
 
   // Budget Timer info
   budgetWaitEndTime?: number;
+}
+
+/** Why a `fastRejection: true` task was rejected without waiting.
+ * - `"busy"`   — the engine was already processing or had queued work.
+ * - `"budget"` — the input and/or output token allowance was insufficient.
+ */
+export type FastRejectionReason = "busy" | "budget";
+
+/**
+ * Thrown (as a promise rejection) by `generate()` when `fastRejection: true`
+ * is set and the request would otherwise have been queued or parked in one of
+ * the `waiting_for_*` states.
+ *
+ * Opportunistic background processors should catch this and drive their own
+ * retry loop instead of occupying the engine — the UI never sees a queued or
+ * waiting state for these tasks.
+ */
+export class FastRejectionError extends Error {
+  /** Brand — survives module duplication across bundles, unlike `instanceof`. */
+  public readonly isFastRejection = true as const;
+  public readonly reason: FastRejectionReason;
+  /** Milliseconds until the blocking budget is expected to replenish.
+   * Only set for `reason === "budget"`; a hint for the caller's retry loop.
+   * Note this ignores the user-interaction flag, so budget may still be
+   * withheld after this delay until the user interacts with the app. */
+  public readonly retryAfterMs?: number;
+
+  constructor(reason: FastRejectionReason, message: string, retryAfterMs?: number) {
+    super(message);
+    this.name = "FastRejectionError";
+    this.reason = reason;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** Type guard for fast-rejection failures from `generate()`. */
+export function isFastRejection(e: unknown): e is FastRejectionError {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    (e as FastRejectionError).isFastRejection === true
+  );
 }
 
 /** Context pinning for automatic context budgeting.
@@ -45,6 +87,7 @@ interface GenerationTask {
   params: GenerationParams & {
     maxRetries?: number;
     taskId?: string;
+    fastRejection?: boolean;
   };
   contextPinning?: ContextPinning;
   callback?: (choices: GenerationChoice[], final: boolean) => void;
@@ -100,18 +143,37 @@ export class GenX {
    *
    * When `messages` is a MessageFactory function, it will be called at execution
    * time (when the job is picked off the queue), enabling JIT strategy building.
+   *
+   * Set `params.fastRejection` for opportunistic background work: the request
+   * never queues and never parks in a `waiting_for_*` state — it rejects
+   * immediately with a `FastRejectionError` instead, leaving the caller to run
+   * its own retry loop. See `isFastRejection()`.
    */
   public generate(
     messages: Message[] | MessageFactory,
     params: GenerationParams & {
       maxRetries?: number;
       taskId?: string;
+      fastRejection?: boolean;
     },
     callback?: (choices: GenerationChoice[], final: boolean) => void,
     behaviour?: "background" | "blocking",
     signal?: CancellationSignal,
   ): Promise<GenerationResponse> {
     return new Promise((resolve, reject) => {
+      // Fast rejection: never wait behind other work, and never touch the
+      // shared state (a queued/waiting status would show up in the UI as if
+      // the user had to act).
+      if (params.fastRejection && (this.currentTask || this.queue.length > 0)) {
+        reject(
+          new FastRejectionError(
+            "busy",
+            `GenX busy: ${this.queue.length + (this.currentTask ? 1 : 0)} task(s) ahead`,
+          ),
+        );
+        return;
+      }
+
       const isFactory = typeof messages === "function";
 
       const task: GenerationTask = {
@@ -128,7 +190,12 @@ export class GenX {
 
       this.queue.push(task);
       this.updateState({
-        status: this._state.status === "idle" ? "queued" : this._state.status,
+        // A fast-rejection task is only ever enqueued when the engine is idle,
+        // so it goes straight to `generating` below — never advertise `queued`.
+        status:
+          this._state.status === "idle" && !params.fastRejection
+            ? "queued"
+            : this._state.status,
         queueLength: this.queue.length + (this.currentTask ? 1 : 0),
       });
 
@@ -338,8 +405,9 @@ export class GenX {
 
     this.hooks?.beforeGenerate?.(task.id, messages);
 
-    const { maxRetries, taskId, ...apiParams } = params;
-    const retryLimit = maxRetries ?? 5;
+    const { maxRetries, taskId, fastRejection, ...apiParams } = params;
+    // Fast-rejection callers run their own retry loop — never sleep on their behalf.
+    const retryLimit = maxRetries ?? (fastRejection ? 0 : 5);
     let attempts = 0;
 
     while (true) {
@@ -351,8 +419,8 @@ export class GenX {
       try {
         const requestedTokens = apiParams.max_tokens || 1024;
 
-        // Budget Check
-        await this.ensureBudget(messages, params, requestedTokens, signal);
+        // Budget Check (throws immediately when fastRejection is set)
+        await this.ensureBudget(messages, params, requestedTokens, signal, fastRejection);
 
         if (signal?.cancelled) {
           reject("Cancelled");
@@ -378,12 +446,23 @@ export class GenX {
           return;
         }
 
+        if (isFastRejection(e)) {
+          // Don't surface a `failed` status — the background caller owns this
+          // outcome and the UI should stay unaware of it.
+          reject(e);
+          return;
+        }
+
         if (this.isTransientError(e)) {
           attempts++;
           if (attempts > retryLimit) {
             const err = `Transient error retries exhausted: ${e.message}`;
-            this.updateState({ status: "failed", error: err });
-            reject(err);
+            if (fastRejection) {
+              reject(e);
+            } else {
+              this.updateState({ status: "failed", error: err });
+              reject(err);
+            }
             return;
           }
 
@@ -417,6 +496,7 @@ export class GenX {
     params: GenerationParams,
     requestedOutput: number,
     signal?: CancellationSignal,
+    fastRejection?: boolean,
   ): Promise<void> {
     const availableOutput = api.v1.script.getAllowedOutput();
     const availableInput = api.v1.script.getAllowedInput();
@@ -435,6 +515,17 @@ export class GenX {
 
     const outputWait = outputBlocking ? api.v1.script.getTimeUntilAllowedOutput(requestedOutput) : 0;
     const inputWait = inputBlocking ? api.v1.script.getTimeUntilAllowedInput(requestedInput) : 0;
+
+    if (fastRejection) {
+      // Bail out before any waiting or state broadcast, so an opportunistic
+      // background pass never makes the UI ask the user to click Generate.
+      throw new FastRejectionError(
+        "budget",
+        `Insufficient budget: output=${availableOutput}/${requestedOutput}, ` +
+        `input=${availableInput}/${requestedInput}`,
+        Math.max(outputWait, inputWait),
+      );
+    }
 
     api.v1.log(
       `Waiting for budget: output=${availableOutput}/${requestedOutput} (wait=${outputWait}ms), ` +

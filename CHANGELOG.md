@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0] - 2026-08-25
+
+### Added
+
+- **`fastRejection` generation flag** — pass `fastRejection: true` in `generate()` params and the request never queues and never enters a `waiting_for_*` state. If the engine is busy, or if the input/output budget is insufficient, the promise rejects immediately with a `FastRejectionError` (`reason: "busy" | "budget"`, plus a `retryAfterMs` hint for budget rejections) *before* either `waitForAllowedOutput`/`waitForAllowedInput` call. Intended for unobtrusive, opportunistic background processors that run their own retry loop — a queued or waiting state would otherwise make the UI claim the user must click Generate and wait for budget.
+- **`isFastRejection(e)` type guard** and exported `FastRejectionError` / `FastRejectionReason`.
+
+### Changed
+
+- **Retries default to 0 under `fastRejection`** — the engine no longer sleeps through exponential backoff on behalf of a fast-rejection caller (an explicit `maxRetries` is still honoured). Fast rejections and exhausted transient errors on these tasks do not broadcast a `failed` status; genuine generation errors still do.
+
 ## [0.4.0] - 2026-04-10
 
 ### Added
